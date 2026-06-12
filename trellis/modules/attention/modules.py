@@ -109,6 +109,26 @@ class MultiHeadAttention(nn.Module):
         if use_rope:
             self.rope = RotaryPositionEmbedder(channels)
     
+    @torch.no_grad()
+    def get_attn_weights(self, x: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """
+        Compute cross-attention weights in fp32 without flash kernel.
+        Returns [B, H, Lq, Lkv].  Only valid for type=="cross".
+        """
+        assert self._type == "cross", "get_attn_weights only supports cross-attention"
+        B, L, _ = x.shape
+        Lkv = context.shape[1]
+        q  = self.to_q(x.float()).reshape(B, L, self.num_heads, self.head_dim)
+        kv = self.to_kv(context.float()).reshape(B, Lkv, 2, self.num_heads, self.head_dim)
+        k, _ = kv.unbind(dim=2)
+        if self.qk_rms_norm:
+            q = self.q_rms_norm(q.to(x.dtype)).float()
+            k = self.k_rms_norm(k.to(x.dtype)).float()
+        q = q.permute(0, 2, 1, 3)                              # [B, H, L, D]
+        k = k.permute(0, 2, 1, 3)                              # [B, H, Lkv, D]
+        scale = self.head_dim ** -0.5
+        return torch.softmax(q @ k.transpose(-2, -1) * scale, dim=-1)  # [B, H, L, Lkv]
+
     def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, indices: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, L, C = x.shape
         if self._type == "self":

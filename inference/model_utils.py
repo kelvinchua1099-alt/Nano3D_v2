@@ -392,19 +392,64 @@ def run(
                 slat_sampler_params
             )
 
-    if editing_mode == "add" or editing_mode == "remove":
-        # 1. 搬到 CPU 并转为元组提高查询效率
+    # 部件4：从 Stage 1 sampler 取软掩码
+    agve_mask = getattr(self.sparse_structure_sampler, '_agve_mask', None)
+
+    if agve_mask is not None:
+        # ---- 软掩码 SLat 混合 ----------------------------------------
+        # 把 M [1,1,16,16,16] 上采样到 SLat 坐标空间 [64,64,64]
+        M_64 = F.interpolate(
+            agve_mask.to(self.device).float(),
+            size=(64, 64, 64),
+            mode='trilinear',
+            align_corners=False,
+        )[0, 0]  # [64, 64, 64]
+
+        src_np     = src_slat.coords.cpu().numpy()
+        tar_np     = tar_slat.coords.cpu().numpy()
+        src_lookup = {tuple(pos): i for i, pos in enumerate(src_np)}
+
+        colors     = np.zeros((len(tar_np), 3))
+        blend_num  = 0
+
+        for i_tar, pos in enumerate(tar_np):
+            x = min(int(pos[1]), 63)
+            y = min(int(pos[2]), 63)
+            z = min(int(pos[3]), 63)
+            w = M_64[x, y, z].item()          # 编辑权重：1=完全用 tar，0=完全用 src
+
+            pos_tuple = tuple(pos)
+            if pos_tuple in src_lookup:
+                i_src = src_lookup[pos_tuple]
+                tar_slat.feats[i_tar] = (
+                    w * tar_slat.feats[i_tar] + (1 - w) * src_slat.feats[i_src]
+                )
+                colors[i_tar] = [1 - w, w, 0.0]   # 红=src主导，绿=tar主导
+                blend_num += 1
+            else:
+                colors[i_tar] = [0.0, 1.0, 0.0]   # 无 src 对应，保留 tar
+
+        print("=" * 40)
+        print(f"AGVE Soft SLat Blend: blended {blend_num} / {len(tar_np)} tokens")
+        print("=" * 40)
+
+        tar_xyz    = tar_np[:, -3:]
+        pcd        = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(tar_xyz)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+        o3d.io.write_point_cloud(os.path.join(output_path, "diff_show.ply"), pcd)
+
+    elif editing_mode == "add" or editing_mode == "remove":
+        # ---- 原始硬合并（add / remove）--------------------------------
         src_np = src_slat.coords.cpu().numpy()
         tar_np = tar_slat.coords.cpu().numpy()
         src_c = [tuple(c) for c in src_np]
         tar_c = [tuple(c) for c in tar_np]
 
-        # 2. 建立索引映射
         pos_to_idx2 = {pos: i for i, pos in enumerate(tar_c)}
         colors = np.zeros((len(tar_np), 3))
         colors[:] = [1.0, 0.0, 0.0]
 
-        # 3. 直接赋值
         merge_num = 0
         all_num   = 0
         for i1, pos in enumerate(src_c):
@@ -422,75 +467,53 @@ def run(
         pcd        = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(tar_xyz)
         pcd.colors = o3d.utility.Vector3dVector(colors)
-        o3d.io.write_point_cloud(
-                os.path.join(output_path, "diff_show.ply"),
-                pcd
-            )
+        o3d.io.write_point_cloud(os.path.join(output_path, "diff_show.ply"), pcd)
         print("可视化点云已保存至 merge_visualization.ply (绿:已合并, 红:未变)")
+
     elif editing_mode == "replace":
-        # 1. 搬到 CPU 并转为集合/字典提高查询效率
+        # ---- 原始硬合并（replace）-------------------------------------
         src_np = src_slat.coords.cpu().numpy()
         tar_np = tar_slat.coords.cpu().numpy()
-        # 假设 mask_coords 也是一个 [N, 3] 的 Tensor 或 Array
 
         edit_cube_mask  = torch.nonzero(torch.from_numpy(edit_cube_mask) > 0).to(torch.int32)
         batch_idx       = torch.zeros(
-            (edit_cube_mask.shape[0], 1), 
-            dtype=torch.int32, 
+            (edit_cube_mask.shape[0], 1),
+            dtype=torch.int32,
             device=edit_cube_mask.device
         )
-        mask_coords     = torch.cat([batch_idx, edit_cube_mask ], dim=1)
+        mask_coords = torch.cat([batch_idx, edit_cube_mask], dim=1)
+        mask_np     = mask_coords.cpu().numpy()
 
-        mask_np = mask_coords.cpu().numpy() if hasattr(mask_coords, 'cpu') else mask_coords
-
-        # 转为 tuple 以便进行哈希查询
         src_lookup = {tuple(pos): i for i, pos in enumerate(src_np)}
-        mask_set = set(tuple(pos) for pos in mask_np)
+        mask_set   = set(tuple(pos) for pos in mask_np)
 
-        # 2. 准备颜色数组 (用于可视化)
-        # 红色 [1, 0, 0] 表示保留了 tar 特征
-        # 绿色 [0, 1, 0] 表示替换成了 src 特征
-        colors = np.zeros((len(tar_np), 3))
-        colors[:] = [1.0, 0.0, 0.0] 
-
-        # 3. 执行特征替换逻辑
+        colors    = np.zeros((len(tar_np), 3))
+        colors[:] = [1.0, 0.0, 0.0]
         merge_num = 0
-        all_num = len(tar_np)
 
         for i_tar, pos in enumerate(tar_np):
             pos_tuple = tuple(pos)
-            
-            # 逻辑判断：
-            # 如果在 mask_coords 中 -> 采用 tar (即不做操作)
-            # 如果不在 mask_coords 中 -> 尝试采用 src
             if pos_tuple in mask_set:
-                # 落在 Mask 内，强制保留原始 tar 特征
-                colors[i_tar] = [1.0, 0.0, 0.0] # 红色
+                colors[i_tar] = [1.0, 0.0, 0.0]
             else:
-                # 落在 Mask 外，尝试从 src 获取特征
                 if pos_tuple in src_lookup:
                     i_src = src_lookup[pos_tuple]
-                    # 替换特征
                     tar_slat.feats[i_tar] = src_slat.feats[i_src]
-                    colors[i_tar] = [0.0, 1.0, 0.0] # 绿色
+                    colors[i_tar] = [0.0, 1.0, 0.0]
                     merge_num += 1
                 else:
-                    # 如果不在 mask 里，但 src 里也没有这个点，通常只能保留 tar
-                    colors[i_tar] = [0.4, 0.4, 0.4] # 灰色表示既不在mask也不在src
+                    colors[i_tar] = [0.4, 0.4, 0.4]
 
         print("="*40)
-        print(f"SLAT Mask Merge: Replaced {merge_num} / {all_num} features from source")
+        print(f"SLAT Mask Merge: Replaced {merge_num} / {len(tar_np)} features from source")
         print(f"Mask Protected: {len(mask_set)} points potentially protected")
         print("="*40)
 
-        # 4. 可视化
-        tar_xyz = tar_np[:, -3:] # 假设最后三列是 XYZ，如果只有三列则直接用 tar_np
+        tar_xyz = tar_np[:, -3:]
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(tar_xyz)
         pcd.colors = o3d.utility.Vector3dVector(colors)
-        
-        output_file = os.path.join(output_path, "mask_merge_diff.ply")
-        o3d.io.write_point_cloud(output_file, pcd)
+        o3d.io.write_point_cloud(os.path.join(output_path, "mask_merge_diff.ply"), pcd)
         print(f"可视化已保存至 {output_file} (红:Mask保护区域, 绿:已替换为Src, 灰:无匹配)")
     return self.decode_slat(tar_slat, formats)
 
