@@ -97,8 +97,8 @@ def sample(
         # 部件1+2 参数
         use_agve     = kwargs.get("use_agve", False)
         warmup_steps = kwargs.get("warmup_steps", 5)    # warmup 阶段 gate=1，不剪枝
-        alpha        = kwargs.get("alpha", 6.0)          # 速度差信号权重（已提升）
-        beta         = kwargs.get("beta", 0.0)           # 注意力信号权重（暂屏蔽）
+        alpha        = kwargs.get("alpha", 6.0)          # 速度差信号权重
+        beta         = kwargs.get("beta", 3.0)           # 注意力信号权重
         delta        = kwargs.get("delta", 0.5)          # sigmoid 偏置
         gamma        = kwargs.get("gamma", 0.8)          # EMA 衰减系数
         topk_k       = kwargs.get("topk_k", 50)          # 取变化最大的 DINO patch 数
