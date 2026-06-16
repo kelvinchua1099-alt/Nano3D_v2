@@ -7,7 +7,6 @@ import bpy
 import json
 import torch
 import utils3d
-import base64
 import argparse
 import numpy as np
 from typing import *
@@ -67,53 +66,39 @@ print(f"\nLoading DINOv2 model Done")
 # DeepSeek part decomposition
 # ============================================================================
 def decompose_parts_via_deepseek(
-    image_path: str,
+    object_description: str,
     api_key: str,
     model: str = "deepseek-chat",
     base_url: str = "https://api.deepseek.com",
 ) -> list:
-    """Call DeepSeek API with the rendered image to get an ordered parts list."""
+    """Call DeepSeek API with a text description to get an ordered parts list."""
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, base_url=base_url)
 
-    with open(image_path, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    suffix = image_path.rsplit(".", 1)[-1].lower()
-    mime   = "image/png" if suffix == "png" else "image/jpeg"
-
     system_prompt = (
         "You are a 3D asset decomposition expert. "
-        "When given an image of a 3D object, you identify its structural parts "
+        "When given a text description of a 3D object, decompose it into its structural parts "
         "and return them as an ordered JSON array of short edit instructions, "
         "from the most fundamental base part to the finest detail."
     )
 
     user_prompt = (
-        "Analyze this 3D object image and decompose it into its distinct structural parts/components.\n\n"
+        f'Decompose this 3D object into its distinct structural parts: "{object_description}"\n\n'
         "Rules:\n"
-        "- List parts from most fundamental (e.g. body/torso) to most detailed (e.g. accessories)\n"
-        "- Each item should be a short edit instruction in English (under 10 words)\n"
-        "- Format: 'add <part description>' or 'replace <part> with <description>'\n"
+        "- Order from most fundamental (e.g. body/torso) to most detailed (e.g. accessories)\n"
+        "- Each item must be a short edit instruction in English (under 10 words)\n"
+        "- Format: 'add <part description>'\n"
         "- Return ONLY a valid JSON array of strings, nothing else\n\n"
-        'Example output: ["add body torso", "add legs", "add arms", "add head", "add hat"]'
+        'Example for "a cartoon bear with a red hat and backpack":\n'
+        '["add bear body", "add bear legs", "add bear arms", "add bear head", "add red hat", "add backpack"]'
     )
 
     response = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{image_b64}"},
-                    },
-                    {"type": "text", "text": user_prompt},
-                ],
-            },
+            {"role": "user",  "content": user_prompt},
         ],
         max_tokens=512,
         temperature=0.2,
@@ -122,7 +107,6 @@ def decompose_parts_via_deepseek(
     content = response.choices[0].message.content.strip()
     print(f"[DeepSeek] Raw response: {content}")
 
-    # Extract JSON array robustly
     json_match = re.search(r"\[.*?\]", content, re.DOTALL)
     if json_match:
         parts = json.loads(json_match.group())
@@ -155,6 +139,7 @@ def wrapped_edit_instruction(instruction: str) -> str:
 # ============================================================================
 def run_decompose(
     src_input_image_path: str,
+    object_description: str,
     output_dir: str,
     editing_mode: str,
     qwen_image_pipeline,
@@ -185,20 +170,12 @@ def run_decompose(
     current_mesh_path = os.path.join(iter_dir, "mesh.glb")
     src_glb.export(current_mesh_path)
 
-    # Render front view for DeepSeek decomposition prompt
-    render_front_view(
-        file_path   = current_mesh_path,
-        output_dir  = os.path.join(iter_dir, "image"),
-        output_name = "front.png",
-    )
-    front_for_decompose = bg_to_white(os.path.join(iter_dir, "image", "front.png"))
-
     # ---- Call DeepSeek to get parts list ----
     print("\n[Decompose] Calling DeepSeek to decompose object into parts...")
     parts = decompose_parts_via_deepseek(
-        image_path = front_for_decompose,
-        api_key    = deepseek_api_key,
-        model      = deepseek_model,
+        object_description = object_description,
+        api_key            = deepseek_api_key,
+        model              = deepseek_model,
     )
     print(f"[Decompose] Parts ({len(parts)}): {parts}")
     with open(os.path.join(decompose_dir, "parts.json"), "w") as f:
@@ -326,6 +303,8 @@ if __name__ == "__main__":
                         help="DeepSeek API key (decompose only)")
     parser.add_argument("--deepseek_model", type=str, default="deepseek-chat",
                         help="DeepSeek model name (default: deepseek-chat)")
+    parser.add_argument("--object_description", type=str, default="",
+                        help="Text description of the object to decompose into parts (decompose only)")
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -333,6 +312,7 @@ if __name__ == "__main__":
     if args.mode == "decompose":
         assert args.deepseek_api_key, "--deepseek_api_key is required for decompose mode"
         assert args.lora_path, "--lora_path is required for decompose mode"
+        assert args.object_description, "--object_description is required for decompose mode"
 
         print("Loading Qwen-Image model...")
         qwen_image_pipeline = load_qwen_image(
@@ -343,6 +323,7 @@ if __name__ == "__main__":
 
         run_decompose(
             src_input_image_path = args.src_input_image_path,
+            object_description   = args.object_description,
             output_dir           = args.output_dir,
             editing_mode         = args.editing_mode,
             qwen_image_pipeline  = qwen_image_pipeline,
