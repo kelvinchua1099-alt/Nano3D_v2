@@ -515,7 +515,9 @@ def run(
         pcd.colors = o3d.utility.Vector3dVector(colors)
         o3d.io.write_point_cloud(os.path.join(output_path, "mask_merge_diff.ply"), pcd)
         print(f"可视化已保存至 {output_file} (红:Mask保护区域, 绿:已替换为Src, 灰:无匹配)")
-    return self.decode_slat(tar_slat, formats)
+    decoded = self.decode_slat(tar_slat, formats)
+    decoded["slat"] = tar_slat
+    return decoded
 
 @torch.no_grad()
 def run_custom(
