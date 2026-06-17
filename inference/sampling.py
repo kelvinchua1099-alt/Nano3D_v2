@@ -110,6 +110,10 @@ def sample(
                 "cfg_strength": tar_cfg
             }
 
+        vdelta_save_dir = os.path.join(kwargs.get("output_path", ""), "vdelta")
+        os.makedirs(vdelta_save_dir, exist_ok=True)
+        vdelta_records = []   # list of {"step": int, "t": float, "v_delta": np.ndarray}
+
         num_st = -1
         for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
             num_st += 1
@@ -123,9 +127,20 @@ def sample(
                 _, _, Vt_src = self._get_model_prediction(model, zt_src, t, src_cond, **src_kwargs)
                 _, _, Vt_tar = self._get_model_prediction(model, zt_tar, t, tar_cond, **tar_kwargs)
                 V_delta_avg += (1/n_avg) * (Vt_tar - Vt_src)
+
+            # Save V_delta for this step: shape [1, 8, 16, 16, 16]
+            v_delta_np = V_delta_avg.float().cpu().numpy()
+            np.save(os.path.join(vdelta_save_dir, f"step_{num_st:03d}_t{t:.4f}.npy"), v_delta_np)
+            vdelta_records.append({"step": num_st, "t": float(t), "v_delta": v_delta_np})
+
             zt_edit = zt_edit.to(torch.float32)
             zt_edit = zt_edit + (t_prev - t) * V_delta_avg
             zt_edit = zt_edit.to(V_delta_avg.dtype)
+
+        # Save metadata: step index and t value for each record
+        meta = [{"step": r["step"], "t": r["t"]} for r in vdelta_records]
+        np.save(os.path.join(vdelta_save_dir, "meta.npy"), meta)
+        print(f"[vdelta] Saved {len(vdelta_records)} V_delta tensors to: {vdelta_save_dir}")
         return zt_edit
     else:
         kwargs.pop("output_path")
