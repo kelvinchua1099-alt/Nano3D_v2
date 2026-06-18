@@ -114,6 +114,10 @@ def sample(
         os.makedirs(vdelta_save_dir, exist_ok=True)
         vdelta_records = []   # list of {"step": int, "t": float, "v_delta": np.ndarray}
 
+        # Save source latent for later cosine-sim analysis
+        np.save(os.path.join(vdelta_save_dir, "x_src_packed.npy"),
+                x_src_packed.float().cpu().numpy())
+
         num_st = -1
         for t, t_prev in tqdm(t_pairs, desc="Sampling", disable=not verbose):
             num_st += 1
@@ -136,6 +140,10 @@ def sample(
             zt_edit = zt_edit.to(torch.float32)
             zt_edit = zt_edit + (t_prev - t) * V_delta_avg
             zt_edit = zt_edit.to(V_delta_avg.dtype)
+
+        # Save final edited latent for voxel-diff cosine-sim analysis
+        np.save(os.path.join(vdelta_save_dir, "zt_edit_final.npy"),
+                zt_edit.float().cpu().numpy())
 
         # Save metadata: step index and t value for each record
         meta = [{"step": r["step"], "t": r["t"]} for r in vdelta_records]
