@@ -287,8 +287,9 @@ def run(
     output_path: str = "",
     st_step: int = 12,
     back_render_path: str = "",
-    ref_image_path: str = "",   # round-0 target image for geometric anchor
-    geo_alpha: float = 0.1,     # small weight — anchor, not dominate
+    ref_image_path: str = "",          # round-0 target image for geometric anchor
+    geo_alpha: float = 0.1,            # small weight — anchor, not dominate
+    slat_tar_image_paths: List[str] = None,  # N refined views for multi-view SLAT
 ) -> dict:
     assert editing_mode in ["add", "remove", "replace"], "editing_mode must be 'add' or 'remove' or 'replace'"
     src_img             = Image.open(source_image_path)
@@ -380,33 +381,33 @@ def run(
     v_refined  = torch.cat([batch_idx, v_refined ], dim=1)
     tar_coords = v_refined.to('cuda')
 
-    if back_img is None:
-        tar_slat = self.sample_slat(
-                tar_cond,
-                tar_coords, 
-                slat_sampler_params
-            )
-    else:
-        # 'stochastic', 'multidiffusion'
+    _slat_params = {"steps": 12, "cfg_strength": 3, **slat_sampler_params}
 
+    if slat_tar_image_paths is not None:
+        # Multi-view SLAT: N refined views alternate stochastically across steps.
+        # Each image is preprocessed independently so viewpoint-specific appearance
+        # is preserved (not averaged).
+        slat_imgs = []
+        for p in slat_tar_image_paths:
+            img = Image.open(p)
+            if preprocess_image:
+                img = self.preprocess_image(img)
+            slat_imgs.append(img)
+        slat_cond = self.get_cond(slat_imgs)          # [N, 1370, 1024]
+        slat_cond['neg_cond'] = slat_cond['neg_cond'][:1]
+        with self.inject_sampler_multi_image(
+                'slat_sampler', len(slat_imgs), _slat_params["steps"], mode='stochastic'):
+            tar_slat = self.sample_slat(slat_cond, tar_coords, _slat_params)
+
+    elif back_img is not None:
         tar_cond = self.get_cond(back_img)
         tar_cond['neg_cond'] = tar_cond['neg_cond'][:1]
-
         with self.inject_sampler_multi_image(
-                'slat_sampler', 
-                len(back_img), 
-                12, 
-                mode='stochastic'
-            ):
-            slat_sampler_params={
-                "steps": 12,
-                "cfg_strength": 3,
-            }
-            tar_slat = self.sample_slat(
-                tar_cond, 
-                tar_coords, 
-                slat_sampler_params
-            )
+                'slat_sampler', len(back_img), _slat_params["steps"], mode='stochastic'):
+            tar_slat = self.sample_slat(tar_cond, tar_coords, _slat_params)
+
+    else:
+        tar_slat = self.sample_slat(tar_cond, tar_coords, slat_sampler_params)
 
     if editing_mode == "add" or editing_mode == "remove":
         # 1. 搬到 CPU 并转为元组提高查询效率

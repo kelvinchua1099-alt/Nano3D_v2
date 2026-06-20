@@ -40,6 +40,7 @@ from inference.voxel_encoding import voxel_grid_to_ply, VoxelProcessor
 from inference.model_utils import extract_and_decode_voxel, load_sparse_structure_encoder, inject_methods, feats_to_slat
 from inference.sampling import sample_sparse_structure, sample
 from inference.qwen_image_edit import qwen_image_edit_main, load_qwen_image
+from inference.refinement import MultiRoundRefiner
 
 # ============================================================================
 # STEP-0: Load pipeline and model
@@ -106,6 +107,20 @@ if __name__ == "__main__":
         help     = "path to the LoRA weights for Qwen Image Edit"
     )
 
+    parser.add_argument(
+        "--n_refine_rounds",
+        type    = int,
+        default = 0,
+        help    = "number of multi-view refinement rounds after round-0 edit (0 = disabled)"
+    )
+
+    parser.add_argument(
+        "--geo_alpha",
+        type    = float,
+        default = 0.1,
+        help    = "geometric anchor weight for refinement rounds (small value recommended)"
+    )
+
     args             = parser.parse_args()
     src_mesh_path    = args.src_mesh_path
     output_dir       = args.output_dir
@@ -113,6 +128,8 @@ if __name__ == "__main__":
     using_qwen_image = args.using_qwen_image
     edit_instruction = args.edit_instruction
     lora_path        = args.lora_path
+    n_refine_rounds  = args.n_refine_rounds
+    geo_alpha        = args.geo_alpha
 
     if using_qwen_image == True:
         print("Loading Qwen-Image for image editing...")
@@ -185,7 +202,26 @@ if __name__ == "__main__":
         glb = postprocessing_utils.to_glb(
             outputs['gaussian'][0],
             outputs['mesh'][0],
-            simplify     = 0.95,          # Ratio of triangles to remove in the simplification process
-            texture_size = 1024,      # Size of the texture used for the GLB
+            simplify     = 0.95,
+            texture_size = 1024,
         )
-    glb.export(f"{output_dir}/edit_mesh.glb")
+    r0_mesh_path = f"{output_dir}/edit_mesh.glb"
+    glb.export(r0_mesh_path)
+
+    # STEP-6: Multi-round refinement (optional)
+    if n_refine_rounds > 0:
+        qwen_pipe = qwen_image_pipeline if using_qwen_image else None
+        refiner = MultiRoundRefiner(pipeline, qwen_pipeline=qwen_pipe, lora_path=lora_path)
+        refiner.run(
+            src_image_path        = src_image_path,
+            first_edit_mesh_path  = r0_mesh_path,
+            first_edit_ply_path   = f"{output_dir}/edit_voxel_post.ply",
+            first_edit_slat       = outputs["slat"],
+            first_edit_image_path = tar_image_path,   # round-0 front edit → geo-anchor
+            edit_instruction      = edit_instruction,
+            editing_mode          = editing_mode,
+            out_dir               = output_dir,
+            n_rounds              = n_refine_rounds,
+            seed                  = 1,
+            geo_alpha             = geo_alpha,
+        )
