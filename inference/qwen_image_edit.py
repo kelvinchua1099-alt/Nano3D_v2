@@ -21,11 +21,31 @@ def qwen_image_edit_main(
     base_seed: int = 42,
     num_inference_steps: int = 8,
     true_cfg_scale: float = 1.0,
-    device = "cuda"
+    device = "cuda",
+    reference_image_path: str = None,
 ):
     # Load the input image
     assert os.path.exists(image_path), f"Image path {image_path} does not exist"
     input_image = Image.open(image_path).convert("RGB")
+
+    # If a reference image is provided, composite it side-by-side on the LEFT.
+    # The model sees [reference | input] and the prompt instructs it to edit the
+    # right half using the left half as visual context.
+    if reference_image_path is not None and os.path.exists(reference_image_path):
+        ref_img = Image.open(reference_image_path).convert("RGB")
+        w, h    = input_image.size
+        ref_img = ref_img.resize((w, h), Image.LANCZOS)
+        composite = Image.new("RGB", (w * 2, h))
+        composite.paste(ref_img,    (0, 0))
+        composite.paste(input_image, (w, 0))
+        input_image      = composite
+        edit_instruction = (
+            "The LEFT half of this image is a reference showing the desired editing result "
+            "from the front view. The RIGHT half shows the same 3D object from a different angle. "
+            f"{edit_instruction} "
+            "Only edit the RIGHT half to match the reference style. "
+            "Keep the LEFT half unchanged."
+        )
 
     if "Qwen-Image-2512" in model_name:
         negative_prompt = "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。"

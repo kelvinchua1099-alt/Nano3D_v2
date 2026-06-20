@@ -287,6 +287,8 @@ def run(
     output_path: str = "",
     st_step: int = 12,
     back_render_path: str = "",
+    ref_image_path: str = "",   # round-0 target image for geometric anchor
+    geo_alpha: float = 0.1,     # small weight — anchor, not dominate
 ) -> dict:
     assert editing_mode in ["add", "remove", "replace"], "editing_mode must be 'add' or 'remove' or 'replace'"
     src_img             = Image.open(source_image_path)
@@ -309,14 +311,28 @@ def run(
     src_cond = self.get_cond([src_img])
     tar_cond = self.get_cond([tar_img])
 
+    # Build round-0 anchor condition when a reference image is provided.
+    # tar_cond_r0 is queried at the same zt_tar as tar_cond (see sampling.py),
+    # so the delta (V_tgt1 - V_src) is a pure conditioning contrast with no
+    # cross-state noise. geo_alpha kept small to anchor, not redirect.
+    tar_cond_r0 = None
+    if ref_image_path != "" and os.path.exists(ref_image_path):
+        ref_img = Image.open(ref_image_path)
+        if preprocess_image:
+            ref_img = self.preprocess_image(ref_img)
+        tar_cond_r0 = self.get_cond([ref_img])
+        print(f"[geo-anchor] Loaded ref cond from {ref_image_path}, geo_alpha={geo_alpha}")
+
     torch.manual_seed(seed)
     sparse_structure_sampler_params = {
         "source_voxel_latent": source_voxel_latent,
-        "src_cond": src_cond,
-        "tar_cond": tar_cond,
+        "src_cond":    src_cond,
+        "tar_cond":    tar_cond,
         "output_path": output_path,
-        "st_step" : st_step,
-        **sparse_structure_sampler_params
+        "st_step":     st_step,
+        "geo_alpha":   geo_alpha,
+        **({"tar_cond_r0": tar_cond_r0} if tar_cond_r0 is not None else {}),
+        **sparse_structure_sampler_params,
     }
     tar_coords = self.sample_sparse_structure(
             src_cond,
@@ -492,7 +508,9 @@ def run(
         output_file = os.path.join(output_path, "mask_merge_diff.ply")
         o3d.io.write_point_cloud(output_file, pcd)
         print(f"可视化已保存至 {output_file} (红:Mask保护区域, 绿:已替换为Src, 灰:无匹配)")
-    return self.decode_slat(tar_slat, formats)
+    ret = self.decode_slat(tar_slat, formats)
+    ret['slat'] = tar_slat   # expose for next refinement round
+    return ret
 
 @torch.no_grad()
 def run_custom(

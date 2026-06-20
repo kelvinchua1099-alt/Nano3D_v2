@@ -93,6 +93,13 @@ def sample(
         tar_cond     = kwargs["tar_cond"]["cond"]
         # x_src_packed:  torch.Size([1, 8, 16, 16, 16])
         # cond        :  torch.Size([1, 1370, 1024])
+
+        # Optional: round-0 target cond for geometric consistency guidance.
+        # When provided, all three velocities are queried at the same zt_tar,
+        # and the round-0 delta is added with a small weight to anchor the
+        # trajectory without dominating the new editing signal.
+        tar_cond_r0 = kwargs["tar_cond_r0"]["cond"] if "tar_cond_r0" in kwargs else None
+        geo_alpha   = kwargs.get("geo_alpha", 0.1)   # intentionally small
         t_seq        = np.linspace(1, 0, steps + 1)
         t_seq        = rescale_t * t_seq / (1 + (rescale_t - 1) * t_seq)
         t_pairs      = list((t_seq[i], t_seq[i + 1]) for i in range(steps))
@@ -125,12 +132,27 @@ def sample(
                 continue
             V_delta_avg  = torch.zeros_like(x_src_packed)
             for k in range(n_avg):
-                fwd_noise    = torch.randn_like(x_src_packed).to(x_src_packed.device)
-                zt_src       = (1-t)*x_src_packed + (t)*fwd_noise
-                zt_tar       = zt_edit + zt_src - x_src_packed
-                _, _, Vt_src = self._get_model_prediction(model, zt_src, t, src_cond, **src_kwargs)
-                _, _, Vt_tar = self._get_model_prediction(model, zt_tar, t, tar_cond, **tar_kwargs)
-                V_delta_avg += (1/n_avg) * (Vt_tar - Vt_src)
+                fwd_noise = torch.randn_like(x_src_packed).to(x_src_packed.device)
+                zt_src    = (1-t)*x_src_packed + (t)*fwd_noise
+                zt_tar    = zt_edit + zt_src - x_src_packed
+
+                if tar_cond_r0 is not None:
+                    # All three predictions at the same zt_tar so the
+                    # differences are pure conditioning deltas with no
+                    # cross-state noise.
+                    #   V = (V_tgt2 - V_src)           ← new editing signal
+                    #     + geo_alpha*(V_tgt1 - V_src)  ← soft anchor to r0
+                    _, _, Vt_src  = self._get_model_prediction(model, zt_tar, t, src_cond,    **src_kwargs)
+                    _, _, Vt_tar1 = self._get_model_prediction(model, zt_tar, t, tar_cond_r0, **tar_kwargs)
+                    _, _, Vt_tar2 = self._get_model_prediction(model, zt_tar, t, tar_cond,    **tar_kwargs)
+                    V_delta = (Vt_tar2 - Vt_src) + geo_alpha * (Vt_tar1 - Vt_src)
+                else:
+                    # Original algorithm — untouched
+                    _, _, Vt_src = self._get_model_prediction(model, zt_src, t, src_cond, **src_kwargs)
+                    _, _, Vt_tar = self._get_model_prediction(model, zt_tar, t, tar_cond, **tar_kwargs)
+                    V_delta = Vt_tar - Vt_src
+
+                V_delta_avg += (1/n_avg) * V_delta
 
             # Save V_delta for this step: shape [1, 8, 16, 16, 16]
             v_delta_np = V_delta_avg.float().cpu().numpy()

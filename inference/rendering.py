@@ -405,6 +405,65 @@ def render_front_view(file_path: str, output_dir: str, output_name: str = "front
     renderer = BpyFrontRenderer(resolution=resolution, engine=engine, geo_mode=geo_mode, split_normal=split_normal)
     return renderer.render_front_view(file_path, output_dir, output_name, scale, offset)
 
+
+# (yaw in radians, human-readable name)
+FOUR_VIEW_CONFIG = [
+    (-np.pi / 2, "front"),
+    (0.0,        "right"),
+    (np.pi / 2,  "back"),
+    (np.pi,      "left"),
+]
+
+
+def render_n_views(
+    file_path:   str,
+    output_dir:  str,
+    view_config: list = None,
+    resolution:  int  = 512,
+    engine:      str  = "CYCLES",
+) -> List[Dict]:
+    """
+    Render N views of a mesh at specified yaw angles.
+
+    Args:
+        view_config: list of (yaw_radians, name) tuples. Defaults to FOUR_VIEW_CONFIG.
+
+    Returns:
+        List of dicts: {name, yaw, image_path}
+    """
+    if view_config is None:
+        view_config = FOUR_VIEW_CONFIG
+
+    os.makedirs(output_dir, exist_ok=True)
+    renderer = BpyFrontRenderer(resolution=resolution, engine=engine)
+    renderer.init_render_settings()
+    renderer.init_scene()
+    renderer.load_object(file_path)
+    scale, offset = renderer.normalize_scene()
+    cam = renderer.init_camera()
+    renderer.init_lighting()
+
+    radius = 2.0
+    fov    = 40 / 180 * np.pi
+
+    results = []
+    for yaw, name in view_config:
+        cam.location = (
+            radius * np.cos(yaw),
+            radius * np.sin(yaw),
+            0.0,
+        )
+        cam.data.lens = 16 / np.tan(fov / 2)
+        out_path = os.path.join(output_dir, f"{name}.png")
+        bpy.context.scene.render.filepath = out_path
+        bpy.ops.render.render(write_still=True)
+        bpy.context.view_layer.update()
+        print(f"[render_n_views] {name} → {out_path}")
+        results.append({"name": name, "yaw": yaw, "image_path": out_path})
+
+    return results
+
+
 class BpyRenderer:
     def __init__(self, resolution: int = 512, engine: str = "CYCLES", geo_mode: bool = False, split_normal: bool = False):
         self.resolution = resolution
